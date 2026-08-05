@@ -1,3 +1,4 @@
+import contextlib
 import sys
 from collections.abc import Callable
 from typing import Any
@@ -147,9 +148,26 @@ class Layout:
     def build(self, **kwargs: Any) -> None:
         """Builds the layout: finishes the multiplexer and lets the debugger bind output to splits.
 
+        A failure here (most often a gdb without pwndbg, as when pwntools'
+        ``gdb.debug`` launches the system gdb) is degraded the same way a
+        missing multiplexer is: warn, tear down the panes that were opened but
+        will never receive output, and let the debugger print inline.
+
         :param kwargs: forwarded to ``multiplexer.finish`` and ``debugger.setup``.
         """
         if self._fallback:
             return
-        self.multiplexer.finish(**kwargs)
-        self.debugger.setup(self.multiplexer, **kwargs)
+        try:
+            self.multiplexer.finish(**kwargs)
+            self.debugger.setup(self.multiplexer, **kwargs)
+        except Exception as err:
+            print(
+                f"pwnellij: failed to build the layout, falling back to inline "
+                f"debugger output ({err})",
+                file=sys.stderr,
+            )
+            self._fallback = True
+            # The panes are useless now -- nothing will ever be written to
+            # them. Cleaning up must not mask the error reported above.
+            with contextlib.suppress(Exception):
+                self.multiplexer.close()

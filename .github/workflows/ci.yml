@@ -26,9 +26,9 @@ jobs:
       - name: Ruff format
         run: ruff format --check .
 
-      # Both shell scripts are POSIX sh; -s sh makes shellcheck flag bashisms.
+      # All three shell scripts are POSIX sh; -s sh makes shellcheck flag bashisms.
       - name: Shellcheck
-        run: shellcheck -s sh bin/pwnellij scripts/install.sh
+        run: shellcheck -s sh bin/pwnellij bin/pwntools-terminal scripts/install.sh
 
       - name: Pytest
         run: pytest

@@ -1,0 +1,77 @@
+#!/bin/sh
+# pwntools-terminal — open the gdb that pwntools launches inside the multiplexer
+# you are already in, instead of in a detached terminal window.
+#
+# pwntools looks for a `pwntools-terminal` on $PATH before running its own
+# terminal detection (pwnlib/util/misc.py, run_in_new_terminal), so having this
+# on your PATH is all it takes for gdb.debug()/gdb.attach() to land in the same
+# zellij session (or tmux server) as the exploit that launched it.
+#
+# Why ship this instead of waiting for pwntools?
+#
+# pwntools' dev branch has grown zellij support already:
+#
+#     elif 'ZELLIJ' in os.environ and which('zellij'):
+#         terminal = 'zellij'
+#         args = ['action', 'new-pane'] + ['-c'] * kill_at_exit + ['--']
+#
+# but it is unreleased (not in 4.15.0), and until it ships, gdb.debug() falls
+# through to x-terminal-emulator and splits pwnellij in half: the gdb prompt
+# appears in a new window, while pwnellij -- which inherits $ZELLIJ through the
+# environment like any child process -- puts its context panes in the session
+# you came from. Two of that branch's choices also do not suit pwnellij once it
+# does ship, which is why this stays useful afterwards:
+#
+#   * It opens gdb as a pane in the *current* tab. That is right for a lone gdb
+#     pane, but pwnellij then fans four or five context panes out of it, on top
+#     of whatever was already in the tab (including the pane running the
+#     exploit). A tab of its own keeps the layout self-contained -- which is
+#     what bin/pwnellij does for an interactive launch, so this matches it.
+#   * It passes no --cwd. pwnlib's which() does not absolutize, so
+#     gdb.debug('./binary') leaves a relative path on gdb's command line; unless
+#     the pane starts in the exploit's cwd, gdb finds no file and you get a
+#     session with no symbols. Only a script can interpolate $PWD -- a static
+#     context.terminal list in ~/.pwn.conf cannot.
+#
+# Being on $PATH, this file outranks pwntools' own detection permanently, not
+# just until that release. Delete the symlink (~/.local/bin/pwntools-terminal)
+# to hand the choice back to pwntools.
+#
+# There is deliberately no PWNELLIJ_MULTIPLEXER override as in bin/pwnellij:
+# this runs from inside whatever the exploit is running in, so the environment
+# has already made the choice. POSIX sh, like bin/pwnellij and scripts/install.sh.
+set -eu
+
+# pwntools calls this as `pwntools-terminal <command> [args...]`, normally with
+# a single argument: an executable temp script that execve()s gdb. It can also
+# hand run_in_new_terminal() a shell command *string*, which arrives here as one
+# non-executable argument and has to go to a shell rather than be exec'd.
+[ "$#" -gt 0 ] || { printf 'pwntools-terminal: nothing to run\n' >&2; exit 2; }
+if [ "$#" -eq 1 ] && [ ! -x "$1" ]; then
+    set -- sh -c "$1"
+fi
+
+# pwntools names its own GNU screen window this; no reason to differ.
+title="pwntools-gdb"
+
+if [ -n "${ZELLIJ:-}" ] && command -v zellij >/dev/null 2>&1; then
+    # Strip TMUX so the gdb starting here doesn't see a stale tmux env and pick
+    # the wrong backend, mirroring what bin/pwnellij does.
+    unset TMUX TMUX_PANE
+    # --close-on-exit closes the tab when gdb quits (zellij otherwise holds the
+    # dead command pane open). new-tab prints the tab ID; drop it.
+    exec zellij action new-tab \
+        --cwd "$PWD" --name "$title" --close-on-exit -- "$@" >/dev/null
+elif [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
+    unset ZELLIJ ZELLIJ_PANE_ID ZELLIJ_SESSION_NAME
+    # -n also turns off automatic-rename for the window so the name sticks.
+    # Words after -- reach the command as argv, so nothing needs quoting.
+    exec tmux new-window -c "$PWD" -n "$title" -- "$@"
+elif command -v x-terminal-emulator >/dev/null 2>&1; then
+    # Not in a multiplexer after all: do what pwntools would have done on X11.
+    exec x-terminal-emulator -e "$@"
+else
+    printf 'pwntools-terminal: not inside zellij or tmux, and no x-terminal-emulator.\n' >&2
+    printf 'Remove this from your PATH to let pwntools choose a terminal itself.\n' >&2
+    exit 1
+fi

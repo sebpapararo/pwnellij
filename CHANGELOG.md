@@ -9,6 +9,26 @@ renamed to the version on release.
 
 ## [Unreleased]
 
+### Added
+
+- **pwntools integration.** `bin/pwntools-terminal` puts the gdb that
+  `gdb.debug()`/`gdb.attach()` launches into a new tab of the zellij session (or
+  a new tmux window) the exploit is already running in, instead of the detached
+  terminal window pwntools would otherwise pick — which left the gdb prompt and
+  pwnellij's context panes in two different places. The installer symlinks it
+  alongside `pwnellij`, and, when the gdb on `$PATH` cannot import pwndbg but a
+  standalone `pwndbg` launcher is installed, points pwntools at that launcher
+  with `gdb_binary` in `~/.pwn.conf`. `PWNELLIJ_NO_PWNTOOLS=1` skips both.
+
+### Fixed
+
+- A failing `build()` no longer aborts with a raw Python exception. If the
+  multiplexer or the debugger blows up while the layout is being built — most
+  often a gdb without pwndbg, as when pwntools' `gdb.debug()` launches the
+  system gdb — pwnellij now warns, closes the panes it opened, and lets the
+  debugger print its context inline, matching the existing fallback for a
+  multiplexer that cannot start.
+
 ## [1.0.0] - 2026-08-05
 
 First tagged release. pwnellij began as a fork of

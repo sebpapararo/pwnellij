@@ -16,7 +16,10 @@
 #   PWNELLIJ_REPO         git URL to clone (default: the GitHub repo)
 #   PWNELLIJ_REF          branch/tag to fetch (default: main)
 #   PWNELLIJ_NO_GDBINIT   set to any value to install only, skipping ~/.gdbinit
+#   PWNELLIJ_NO_PWNTOOLS  set to any value to skip the pwntools integration
+#                         (the pwntools-terminal link and ~/.pwn.conf)
 #   GDBINIT               path to the gdb init file (default: ~/.gdbinit)
+#   PWN_CONF              path to pwntools' config file (default: ~/.pwn.conf)
 set -eu
 
 REPO="${PWNELLIJ_REPO:-https://github.com/sebpapararo/pwnellij}"
@@ -24,6 +27,7 @@ REF="${PWNELLIJ_REF:-main}"
 BIN_DIR="${PWNELLIJ_BIN_DIR:-$HOME/.local/bin}"
 MUX="${PWNELLIJ_MULTIPLEXER:-zellij}"
 GDBINIT="${GDBINIT:-$HOME/.gdbinit}"
+PWN_CONF="${PWN_CONF:-$HOME/.pwn.conf}"
 MARK_START="# >>> pwnellij >>>"
 MARK_END="# <<< pwnellij <<<"
 
@@ -115,11 +119,12 @@ download_tarball() {
 }
 
 link_bin() {
-    [ -f "$DIR/bin/pwnellij" ] || err "$DIR/bin/pwnellij not found — is $DIR a pwnellij checkout?"
+    name="$1"
+    [ -f "$DIR/bin/$name" ] || err "$DIR/bin/$name not found — is $DIR a pwnellij checkout?"
     mkdir -p "$BIN_DIR"
-    chmod +x "$DIR/bin/pwnellij" 2>/dev/null || true
-    ln -sf "$DIR/bin/pwnellij" "$BIN_DIR/pwnellij"
-    say "Linked $BIN_DIR/pwnellij -> $DIR/bin/pwnellij"
+    chmod +x "$DIR/bin/$name" 2>/dev/null || true
+    ln -sf "$DIR/bin/$name" "$BIN_DIR/$name"
+    say "Linked $BIN_DIR/$name -> $DIR/bin/$name"
 }
 
 layout_ctor() {
@@ -178,6 +183,58 @@ configure_gdbinit() {
     say "$verb the pwnellij layout ($MUX) in $GDBINIT"
 }
 
+# Does the gdb that pwntools would launch have pwndbg? pwntools runs
+# `pwntools-gdb` or `gdb` from $PATH, and a standalone pwndbg (one that ships
+# its own gdb and python behind a `pwndbg` launcher) is invisible to that gdb --
+# so every gdb.debug() would die in pwnellij's ~/.gdbinit block on `import
+# pwndbg`.
+gdb_imports_pwndbg() {
+    have gdb || return 1
+    # -nx on purpose: without it this probe runs the user's ~/.gdbinit, i.e.
+    # builds a whole pwnellij layout -- spawning panes, if the installer is run
+    # from inside a session -- to answer a yes/no question. The cost is that a
+    # pwndbg loaded only by ~/.gdbinit reads as missing here; that is why the
+    # caller also insists on finding a standalone `pwndbg` launcher before
+    # touching anything.
+    gdb -nx -batch -ex "python import pwndbg; print('PWNDBG_OK')" 2>/dev/null |
+        grep -q PWNDBG_OK
+}
+
+configure_pwnconf() {
+    pwndbg_bin=$(command -v pwndbg 2>/dev/null) || return 0
+    if gdb_imports_pwndbg; then
+        return 0
+    fi
+
+    if [ -f "$PWN_CONF" ] && grep -Eq '^[[:space:]]*gdb_binary[[:space:]]*=' "$PWN_CONF"; then
+        say "$PWN_CONF already sets gdb_binary — leaving it alone"
+        return 0
+    fi
+
+    # pwntools parses these values with pwnlib.util.safeeval, so the path has to
+    # be a quoted Python string rather than a bare word.
+    key="gdb_binary='$pwndbg_bin'"
+    note="# pwnellij: pwntools launches plain gdb, which cannot import a standalone pwndbg."
+    if [ ! -e "$PWN_CONF" ]; then
+        printf '%s\n%s\n\n[context]\n%s\n' \
+            "# Written by the pwnellij installer." "$note" "$key" > "$PWN_CONF"
+    elif grep -Eq '^[[:space:]]*\[context\]' "$PWN_CONF"; then
+        # A second [context] section is not an option: pwntools reads this file
+        # with configparser in strict mode, where a duplicate section raises and
+        # takes every `from pwn import *` down with it. Insert into the section
+        # that is already there.
+        tmp=$(mktemp)
+        awk -v k="$key" -v n="$note" '
+            !ins && /^[ \t]*\[context\]/ { print; print n; print k; ins = 1; next }
+            { print }
+        ' "$PWN_CONF" > "$tmp"
+        mv "$tmp" "$PWN_CONF"
+    else
+        printf '\n%s\n[context]\n%s\n' "$note" "$key" >> "$PWN_CONF"
+    fi
+    say "Pointed pwntools at $pwndbg_bin in $PWN_CONF"
+}
+
 main() {
     case "$MUX" in
         tmux|zellij) ;;
@@ -191,11 +248,19 @@ main() {
     say "multiplexer: $MUX"
 
     fetch_repo "$DIR"
-    link_bin
+    link_bin pwnellij
     if [ -n "${PWNELLIJ_NO_GDBINIT:-}" ]; then
         say "Skipping ~/.gdbinit (PWNELLIJ_NO_GDBINIT set)"
     else
         configure_gdbinit
+    fi
+    # pwntools opens gdb in a terminal of its own choosing, which is a window
+    # outside the session -- see bin/pwntools-terminal for the whole story.
+    if [ -n "${PWNELLIJ_NO_PWNTOOLS:-}" ]; then
+        say "Skipping the pwntools integration (PWNELLIJ_NO_PWNTOOLS set)"
+    else
+        link_bin pwntools-terminal
+        configure_pwnconf
     fi
 
     # Runtime deps are the user's responsibility; just flag anything missing.
