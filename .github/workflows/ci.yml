@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install tools
+        # shellcheck-py ships the shellcheck binary, so this does not depend on
+        # whatever the runner image happens to have.
+        run: pip install ruff pytest shellcheck-py
+
+      - name: Ruff lint
+        run: ruff check .
+
+      - name: Ruff format
+        run: ruff format --check .
+
+      # Both shell scripts are POSIX sh; -s sh makes shellcheck flag bashisms.
+      - name: Shellcheck
+        run: shellcheck -s sh bin/pwnellij scripts/install.sh
+
+      - name: Pytest
+        run: pytest

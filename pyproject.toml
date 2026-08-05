@@ -1,0 +1,29 @@
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+# *.md: ruff 0.16 formats Python code blocks inside Markdown. The README and
+# CLAUDE.md examples are written as multi-line fluent chains on purpose --
+# collapsing them onto one line is worse documentation -- so they are hand-kept.
+extend-exclude = ["docs", "*.md"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "UP",   # pyupgrade
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific
+]
+
+[tool.ruff.lint.per-file-ignores]
+"pwnellij/__init__.py" = ["F401"]  # public re-exports
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

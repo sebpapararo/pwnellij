@@ -102,3 +102,6 @@ venv.bak/
 
 # mypy
 .mypy_cache/
+
+# gdb writes this into whatever directory it was started from
+.gdb_history

@@ -1,0 +1,225 @@
+#!/bin/sh
+# pwnellij — launch gdb inside the multiplexer your .gdbinit configures.
+#
+# The wrapper inspects ~/.gdbinit and ./.gdbinit for a Tmux() call to decide
+# whether to open a tmux window or a zellij tab; zellij is the default. Set
+# PWNELLIJ_MULTIPLEXER=tmux|zellij to override the detection.
+#
+# POSIX sh, like scripts/install.sh: nothing here needs bash, and the command
+# string this builds is quoted so that *any* shell reads it back correctly --
+# which matters because tmux runs it through the user's default-shell. The
+# inner `bash -lc` below is a separate, deliberate choice (see the launch
+# section): it is the shell that ends up running pwndbg, not this script.
+set -eu
+
+# The wrapper's own help. gdb spells this -h/--help too, and gdb's help would
+# otherwise be printed into a tab that closes the moment it exits -- so this
+# intercepts both spellings and points at `pwndbg --help` for gdb's options.
+usage() {
+    cat <<'EOF'
+pwnellij — run gdb+pwndbg inside tmux or zellij, with pwndbg's context split
+across panes instead of scrolling past in one terminal.
+
+Usage:
+  pwnellij [gdb options] [binary [core|pid]]
+  pwnellij --args <binary> [program arguments ...]
+  pwnellij -p <pid>
+  pwnellij -h | --help
+
+Arguments (--args) are forwarded to pwndbg untouched; the wrapper only reads them to
+name the tmux window / zellij tab after whatever is being debugged. For gdb's
+own options, see `pwndbg --help`.
+
+Environment:
+  PWNELLIJ_MULTIPLEXER   tmux or zellij, overriding the ~/.gdbinit scan for a
+                         Tmux() call (zellij is the default)
+  PWNELLIJ_DRY_RUN       print the multiplexer, title and command that would be
+                         used, then exit without launching anything
+
+Examples:
+  pwnellij ./crackme
+  pwnellij --args ./crackme flag.txt
+  pwnellij -p "$(pgrep -f target)"
+
+The pane layout is configured in ~/.gdbinit, in the block the installer wrote
+there. See https://github.com/sebpapararo/pwnellij
+EOF
+    exit 0
+}
+
+# Quote one argument so a shell reads it back as a single literal word: wrap it
+# in single quotes, ending and reopening them around any embedded quote. Words
+# made only of safe characters are passed through as they are, so the common
+# command line stays readable. bash's `printf %q` would be shorter, but it is a
+# bashism that emits $'...' for control characters -- syntax the shell tmux
+# picks (default-shell, i.e. the user's login shell) may not understand.
+quote() {
+    case $1 in
+        '' | *[!A-Za-z0-9_@%+=:,./-]*) ;;
+        *) printf '%s' "$1"; return ;;
+    esac
+    _q_rest=$1
+    _q_out=''
+    while :; do
+        case $_q_rest in
+            *\'*)
+                _q_out="$_q_out${_q_rest%%\'*}'\\''"
+                _q_rest=${_q_rest#*\'}
+                ;;
+            *) break ;;
+        esac
+    done
+    printf "'%s'" "$_q_out$_q_rest"
+}
+
+# The multiplexers take the command to run as a single shell-command string, so
+# the arguments have to survive re-parsing by a shell.
+cmd="pwndbg"
+for arg in "$@"; do
+    cmd="$cmd $(quote "$arg")"
+done
+
+# Work out what is being debugged so the zellij tab / tmux window can be named
+# after it: either a binary path, or a pid to attach to (gdb's -p/--pid, in all
+# the spellings gdb accepts). Everything is still passed through to gdb
+# untouched -- this scan only decides the title.
+attach_pid=""
+attaching=""
+proc_name=""
+target=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        # Short-circuits everything below, including the pid checks: asking for
+        # help should never fail or launch. Sitting inside the scan means the
+        # skip list and the --args break both apply, so a --help that belongs
+        # to a gdb command value or to the debuggee is left alone.
+        -h|--help) usage ;;
+        --pid=*|-pid=*) attaching=1; attach_pid=${1#*=} ;;
+        -p|-pid|--pid)
+            attaching=1
+            attach_pid=${2:-}
+            if [ $# -gt 1 ]; then shift; fi
+            ;;
+        -p?*) attaching=1; attach_pid=${1#-p} ;;
+        # --args ends gdb's own options: its value is the binary and everything
+        # after it belongs to the debuggee. Stopping here keeps an inferior's
+        # arguments out of the scan -- notably its own -p/--pid, which would
+        # otherwise be read as gdb's attach flag and abort the launch below.
+        --args|-args)
+            if [ -z "$target" ]; then target=${2:-}; fi
+            break
+            ;;
+        # gdb options whose value is a separate argument. Skipping the value too
+        # keeps a filename, a gdb command or a pid from being mistaken for the
+        # binary.
+        -x|--command|-ex|--eval-command|-ix|--init-command|-iex|--init-eval-command|\
+        -c|--core|-s|--symbols|-e|--exec|-se|-d|--directory|-b|-l|--cd|--tty|\
+        -D|--data-directory)
+            if [ $# -gt 1 ]; then shift; fi
+            ;;
+        -*) ;;
+        *) if [ -z "$target" ]; then target=$1; fi ;;
+    esac
+    shift
+done
+
+# Fail before opening a tab: a bad pid would otherwise surface as a gdb error in
+# a window the user has to switch to (or, outside a session, one that has just
+# taken over their terminal).
+if [ -n "$attaching" ]; then
+    case "$attach_pid" in
+        ''|*[!0-9]*)
+            # Empty lands here too, which is what `--pid "$(pgrep nope)"` gives.
+            printf "pwnellij: --pid wants a process id, got '%s'\n" "$attach_pid" >&2
+            exit 1
+            ;;
+    esac
+    if command -v ps >/dev/null 2>&1; then
+        if ! proc_name=$(ps -o comm= -p "$attach_pid" 2>/dev/null); then
+            printf 'pwnellij: no such process: %s\n' "$attach_pid" >&2
+            exit 1
+        fi
+        # Keep the first line and drop surrounding blanks: some ps
+        # implementations pad the column, and the title should not inherit that.
+        proc_name=$(printf '%s' "$proc_name" |
+            sed -e '1!d' -e 's/^[[:blank:]]*//' -e 's/[[:blank:]]*$//')
+    fi
+fi
+
+# Plain "pwnellij" when we could not tell what is being debugged.
+title="pwnellij"
+if [ -n "$attaching" ]; then
+    if [ -n "$proc_name" ]; then
+        title="pwnellij: $proc_name ($attach_pid)"
+    else
+        title="pwnellij: pid $attach_pid"
+    fi
+elif [ -n "$target" ]; then
+    title="pwnellij: $(basename -- "$target")"
+fi
+
+# Honor an explicit override, otherwise grep the user's gdb config for a
+# non-commented Tmux(...) call.
+mux="${PWNELLIJ_MULTIPLEXER:-}"
+if [ -z "$mux" ]; then
+    mux="zellij"
+    for cfg in "${HOME:-}/.gdbinit" "./.gdbinit"; do
+        if [ -f "$cfg" ] && grep -Eq '^[[:space:]]*[^#]*\bTmux[[:space:]]*\(' "$cfg"; then
+            mux="tmux"
+            break
+        fi
+    done
+fi
+
+# Test/debug hook: report what would be launched instead of launching it, so the
+# argument scan above can be exercised without a real tmux or zellij session.
+if [ -n "${PWNELLIJ_DRY_RUN:-}" ]; then
+    printf 'mux=%s\ntitle=%s\ncmd=%s\n' "$mux" "$title" "$cmd"
+    exit 0
+fi
+
+if [ "$mux" = "zellij" ]; then
+    # Strip TMUX so the inner gdb's Zellij() doesn't see a stale tmux env.
+    unset TMUX TMUX_PANE
+    if [ -n "${ZELLIJ:-}" ]; then
+        # Already inside zellij: open gdb in a new tab of the current session.
+        # --close-on-exit closes that tab when pwndbg exits (zellij otherwise
+        # holds the dead command pane open), returning you to your previous tab.
+        # new-tab prints the created tab's ID on stdout; drop it.
+        exec zellij action new-tab --name "$title" --close-on-exit -- bash -lc "$cmd" >/dev/null
+    else
+        # Not inside zellij: start a fresh session running gdb, mirroring tmux's
+        # new-session. The command travels via the environment and is eval'd by a
+        # tiny layout, so it needs no KDL escaping; close_on_exit ends the session
+        # (dropping you back to your shell) when pwndbg exits. The tab name is
+        # interpolated into the KDL, so escape its \ and " first.
+        export PWNELLIJ_CMD="$cmd"
+        kdl_title=$(printf '%s' "$title" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
+        # $PWNELLIJ_CMD is meant to stay unexpanded here: the pane's own bash
+        # expands it, which is the whole point of passing it in the environment.
+        # shellcheck disable=SC2016
+        exec zellij --layout-string 'layout {
+    tab name="'"$kdl_title"'" {
+        pane command="bash" {
+            args "-lc" "eval \"$PWNELLIJ_CMD\""
+            close_on_exit true
+        }
+    }
+}'
+    fi
+else
+    # Strip ZELLIJ so the inner gdb's Tmux() detection isn't fooled by a zellij
+    # parent env when we're really launching into tmux.
+    unset ZELLIJ ZELLIJ_PANE_ID ZELLIJ_SESSION_NAME
+    # -n also turns off tmux's automatic-rename for the window, so the title
+    # sticks instead of being replaced by the running command's name.
+    if [ -n "${TMUX:-}" ]; then
+        exec tmux new-window -n "$title" "$cmd"
+    elif tmux has-session -t "=pwnellij" 2>/dev/null; then
+        # A pwnellij session already exists; an explicit -s would die with
+        # "duplicate session", so let tmux name this one.
+        exec tmux new-session -n "$title" "$cmd"
+    else
+        exec tmux new-session -s pwnellij -n "$title" "$cmd"
+    fi
+fi

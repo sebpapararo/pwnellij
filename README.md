@@ -1,220 +1,126 @@
-# splitmind
+# pwnellij
 
-`splitmind` helps to setup a layout of splits to organize presented information.
+[![CI](https://img.shields.io/github/actions/workflow/status/sebpapararo/pwnellij/ci.yml?branch=main&label=CI)](https://github.com/sebpapararo/pwnellij/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-Currently only `gdb` with `pwndbg` as information provider is supported and `tmux` for splitting.
-It relies on the ability to ouput section of information to different tty.
+pwndbg's context split across zellij or tmux panes, one section per pane.
 
+![Example layout](docs/img/default_layout.png)
 
-![Example Image](docs/img/example.png)
-*[Example configuration](docs/examples/example1.gdbinit)*
-
-Note above example uses splitmind and following configuration:
+Requires GDB with [pwndbg](https://github.com/pwndbg/pwndbg), plus [zellij](https://zellij.dev/) or tmux.
 
 ## Install
 
 ```shell
-git clone https://github.com/jerdna-regeiz/splitmind
-echo "source $PWD/splitmind/gdbinit.py" >> ~/.gdbinit
+curl -sSfL https://raw.githubusercontent.com/sebpapararo/pwnellij/main/scripts/install.sh | sh
 ```
 
-It is not showing anything yet. You have to configure your layout yourself.
-As as start, put this into your gdbinit
+Clones pwnellij, puts the `pwnellij` launcher on your `PATH`, and writes a default
+layout into a clearly-marked block in `~/.gdbinit`. Re-run it to update — the rest
+of your `~/.gdbinit` is left alone. Prefix the command with
+`PWNELLIJ_MULTIPLEXER=tmux` to get a tmux layout instead.
+
+<details>
+<summary>Installer options, and installing by hand</summary>
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PWNELLIJ_DIR` | `${XDG_DATA_HOME:-~/.local/share}/pwnellij` | Where the checkout lives |
+| `PWNELLIJ_BIN_DIR` | `~/.local/bin` | Where the launcher is symlinked |
+| `PWNELLIJ_MULTIPLEXER` | `zellij` | `zellij` or `tmux` — which layout to write |
+| `PWNELLIJ_NO_GDBINIT` | _(unset)_ | Install only, leaving `~/.gdbinit` untouched |
+
+By hand: clone the repo, `echo "source $PWD/pwnellij/gdbinit.py" >> ~/.gdbinit`, add
+a layout as below, and run the launcher as `/path/to/pwnellij/bin/pwnellij`.
+</details>
+
+## Use
+
+```shell
+pwnellij ./your-binary
+pwnellij --pid 1234            # also -p 1234, --pid=1234, --pid "$(pgrep -f foo)"
+```
+
+Opens gdb+pwndbg in a new zellij tab (or tmux window) named after what you are
+debugging, then splits pwndbg's context into panes on the first `run`/`start` — or
+the moment the process stops, when attaching. Everything except `-h`/`--help` is
+passed straight through to gdb; `pwnellij --help` describes the rest.
+
+> Attaching fails with `Operation not permitted` while the process is clearly
+> there? Your kernel restricts ptrace. `1` in `/proc/sys/kernel/yama/ptrace_scope`
+> allows attaching only to descendants — run with `sudo -E`, or
+> `sudo sysctl -w kernel.yama.ptrace_scope=0`.
+
+## Configure
+
+The layout is a fluent chain in `~/.gdbinit`. Each directional call splits a new
+pane off the last one created, and `display=` binds a pwndbg section to it:
 
 ```python
 python
-import splitmind
-(splitmind.Mind()
-  .below(display="backtrace")
-  .right(display="stack")
-  .right(display="regs")
-  .right(of="main", display="disasm")
-  .show("legend", on="disasm")
+import pwnellij
+(pwnellij.Layout()
+  .above(display="disasm", size="75%")
+  .left(display="regs", size="35%")
+  .show("stack")
 ).build()
 end
 ```
 
-## Documentation
+| Method | What it does |
+| --- | --- |
+| `.left/.right/.above/.below(display=, of=, **kw)` | Split a new pane in that direction. `of=` targets a different split (object or display name) instead of the last one. |
+| `.show(display, on=)` | Bind another pwndbg section to an existing pane. |
+| `.select(display)` | Change what the next split hangs off. `None` means the main pane. |
+| `.tell_multiplexer(**kw)` | Backend-specific settings: `set_title="…"` (both backends), `show_titles=True\|"bottom"\|False` (tmux only — zellij always shows a pane's name once set). |
+| `.build(**kw)` | Finalise the layout. `nobanner=True` drops pwndbg's per-section banners. |
 
-Currently splitmind can only be used with Tmux and Pwndbg, but it is designed to be able to include
-furthe input and output.
+Splits also accept:
 
-Conceptually there are two abstractions working together:
-* **Splitter**, which setup the actual splits and provide the neccesary output files (tty, files,
-    sockets,...)
-* **Thinker** that generate content to be handed to the output, which must be made aware of the
-splits (or rather the tty, files, sockets, ...)
+| Kwarg | Effect |
+| --- | --- |
+| `size="35%"` | Pane size, in lines/columns or percent. Exact on tmux, best-effort on zellij. |
+| `cmd="…"` | Run this in the pane instead of the default `cat`. |
+| `use_stdin=True` | Pipe the pane's stdin into `cmd`, e.g. `cmd="grep foo"`. |
+| `inferior=True` | Give the debugged program its own pane for stdin/stdout, via gdb's `inferior-tty`. Defaults `cmd` to an idle `tail -f /dev/null` so it cannot steal the program's input, and `clearing=False` so its output survives. |
 
-A third is used as glue: the **Mind**, which works as an easy interface to connect a splitter and a
-thinker. It works as a builder, creating the splits using the splitter and when finished handing the
-generated splits to the thinker. The **Mind** is most likely the only interface you need.
-
-
-### Mind
-```python
-Mind(self, splitter=<class 'splitmind.splitter.tmux.Tmux'>, thinker=<class 'splitmind.thinker.pwndbg.Pwndbg'>)
-```
-A builder to create a splitmind.  
-It splits always on the last created split if no 'of' is given or an other split is selected.  
-To split the original starting point use select(None) or use an 'of' which is not defined yet.  
-Further kwargs are always passed as is the the underlying splitter to be able to have splitter
-specific additional functionality. Parameters not consumed by the splitter are passed as split
-settings to the thinker
-
-#### left
+### tmux instead of zellij
 
 ```python
-Mind.left(self, *args, of=None, display=None, **kwargs)
-```
-
-Creates a split left of the current split.  
-:param str|split    of       : use this split instead of current  
-:param str          display  : the section to be displayed here  
-:param various      args     : further args are passed to the splitting cmd  
-:param dict         kwargs   : further keyword args are passed to the splitter method  
-
-#### right
-
-```python
-Mind.right(self, *args, of=None, display=None, **kwargs)
-```
-
-Creates a split right of the current split.  
-:param str|split    of       : use this split instead of current  
-:param str          display  : the section to be displayed here  
-:param various      args     : further args are passed to the splitting cmd  
-:param dict         kwargs   : further keyword args are passed to the splitter method  
-
-#### above
-
-```python
-Mind.above(self, *args, of=None, display=None, **kwargs)
-```
-
-Creates a split above of the current split.  
-:param str|split    of       : use this split instead of current  
-:param str          display  : the section to be displayed here  
-:param various      args     : further args are passed to the splitting cmd  
-:param dict         kwargs   : further keyword args are passed to the splitter method  
-
-#### below
-
-```python
-Mind.below(self, *args, of=None, display=None, **kwargs)
-```
-
-Creates a split below of the current split.  
-:param str|split    of       : use this split instead of current  
-:param str          display  : the section to be displayed here  
-:param various      args     : further args are passed to the splitting cmd  
-:param dict         kwargs   : further keyword args are passed to the splitter method  
-
-#### show
-
-```python
-Mind.show(self, display, on=None, **kwargs)
-```
-
-Does not create a split but tells to display given section on some already created split.  
-:param str|split    on       : which split to be used  
-:param str          display  : the section to be displayed here  
-:param dict         kwargs   : further keyword args are passed to the splitter method  
-
-#### select
-
-```python
-Mind.select(self, display)
-```
-
-Selects the given display to continue from there.  
-Use None for the main split  
-
-#### tell_splitter
-
-```python
-Mind.tell_splitter(self, **kwargs)
-```
-
-Tells the splitter to configure according to the passed keyword arguments.  
-Which arguments are available and what happens entirely depends on the implementation of the
-splitter
-
-#### build
-
-```python
-Mind.build(self, **kwargs)
-```
-
-Builds the splitmind, by telling the thinker where to put his thoughts  
-:param dict kwagrs : passed to thinker setup to applie thinker specific value  
-
-
-## TMUX
-
-Tmux does handle the splits using `split-window`. Further `*args` are directly passed to the tmux  
-call. Tmux supports following additional and optional keywords:
-- `cmd : str`: The command to run in the created split
-- `use_stdin : boolean`: sets up the split to be able to receive content as stdin to the given cmd
-- `size : str`: gives a size to the new split (as lines or as percentage)
-
-Splits can be created without display to start running arbitrary commands aswell.
-
-Example:
-
-```python
-python
-import splitmind
-(splitmind.Mind()
-  .below(display="backtrace")
-  .right(display="stack", cmd="grep rax", use_stdin=True)
+(pwnellij.Layout(multiplexer=pwnellij.Tmux())
   .right(display="regs")
-  .below(cmd='sleep 1; htop')
-  .below(of="stack", cmd='sleep 1; watch ls')
-  .right(of="main", display="disasm")
-  .show("legend", on="disasm")
+  .below(display="stack")
 ).build()
-end
 ```
 
-## Pwndbg
+The launcher picks its multiplexer by looking for a `Tmux(` call in `~/.gdbinit`
+(or `./.gdbinit`), defaulting to zellij; `PWNELLIJ_MULTIPLEXER` overrides that.
+Tmux mouse mode is enabled by default so the wheel scrolls each pane's history,
+and restored on exit — pass `Tmux(mouse=False)` to leave your setting alone.
 
-Currently Pwndbg is the only thinker / content producer available.  
-It uses the `contextoutput` function to bind context sections to splits with the matching display
-name.
+Two zellij caveats: its CLI only splits right and down, so `left`/`above` are
+emulated by splitting then swapping panes, and it resizes in coarse increments, so
+`size=` gets as close as zellij allows rather than exact.
 
-All `split.settings` (keyword arguments not used by the splitter i.e. tmux) are passed as keyword
-arguments to `contextoutput`
+## Development
 
-With the `build` one can specify following options:
-* **nobanner** boolean: Banners of all configured outputs will be hidden. Same effect as specifying
-banner=False on every split.
+```shell
+pipx install ruff pytest shellcheck-py     # once
 
-## Creating new splitter
+ruff check . && ruff format .              # lint + format
+pytest                                     # full suite
+shellcheck -s sh bin/pwnellij scripts/install.sh
+```
 
-You like screen? Please go ahead and create a splitter for it (and please submit a pullrequest).
+All three should pass before a pull request, and user-facing changes get a line
+under **Unreleased** in [CHANGELOG.md](CHANGELOG.md). Both shell scripts are POSIX
+`sh`, not bash — that is what `-s sh` checks — so keep new shell code free of
+`[[ ]]`, arrays, `+=`, `<<<`, `${v//x/y}` and `printf %q`.
 
-Writing a new splitter is easy, just take a look at `splitmind.splitter.tmux`.  
-It just takes `left/right/above/below()`, as well as `show()`,`get()`, `splits()` and `close()` to
-be implemented. (ABC class will be comming soon)
+## Credits
 
-## Creating a new thinker
+Originally a fork of [splitmind](https://github.com/jerdna-regeiz/splitmind) by
+jerdna-regeiz.
 
-You don't use pwndbg, but have an other case where a splitted layout with automatic tty setup comes
-in handy? Yeah! Please look at `splitmind.thnker.pwndbg`, it is even simpler than splitters are, as
-they only require a `setup(splits)` method which will then do all the initialization of the content
-creation process/programm.
-
-## FAQ
-
-* **How do I create a split containing the input/output of the program debugged by gdb?**
- ```python
-(splitmind.Mind()
-  .above(cmd='tty; tail -f /dev/null', clearing=False)
-).build()
- ```
- 
- Creating a pane which (important) does not clear, shows the used tty and then just reads /dev/null.  
- Tailing /dev/null is important, so that the tty is not bothered at all by the running process.  
-
- Then in `gdb` issue `tty /dev/pts/<ttynr>` with the shown tty. This will use the newly created
- pane as input/output of the debugged process. Just ignore the warning.
+AI tooling is used to aid the development of this project. Changes are reviewed
+before landing, and CI runs the test suite on every push and pull request.
