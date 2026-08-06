@@ -29,6 +29,7 @@ of your `~/.gdbinit` is left alone. Prefix the command with
 | `PWNELLIJ_BIN_DIR` | `~/.local/bin` | Where the launcher is symlinked |
 | `PWNELLIJ_MULTIPLEXER` | `zellij` | `zellij` or `tmux` — which layout to write |
 | `PWNELLIJ_NO_GDBINIT` | _(unset)_ | Install only, leaving `~/.gdbinit` untouched |
+| `PWNELLIJ_NO_PWNTOOLS` | _(unset)_ | Skip the pwntools integration below |
 
 By hand: clone the repo, `echo "source $PWD/pwnellij/gdbinit.py" >> ~/.gdbinit`, add
 a layout as below, and run the launcher as `/path/to/pwnellij/bin/pwnellij`.
@@ -50,6 +51,31 @@ passed straight through to gdb; `pwnellij --help` describes the rest.
 > there? Your kernel restricts ptrace. `1` in `/proc/sys/kernel/yama/ptrace_scope`
 > allows attaching only to descendants — run with `sudo -E`, or
 > `sudo sysctl -w kernel.yama.ptrace_scope=0`.
+
+### With pwntools
+
+`gdb.debug()` and `gdb.attach()` need no changes on your side, but pwntools
+chooses the terminal gdb opens in and does not know about zellij — that support
+exists on its dev branch, unreleased as of 4.15.0. Left alone it opens gdb in a
+*new window*, while pwnellij, which inherits `$ZELLIJ` from your exploit script
+like any child process, splits its context panes into the session you came from:
+the prompt ends up in one place and the context in another.
+
+The installer's answer is `bin/pwntools-terminal`, which pwntools picks up from
+your `PATH` ahead of its own detection and which opens gdb in a tab of the
+session you are already in. It also points pwntools at a standalone pwndbg when
+it finds one, since `gdb.debug()` otherwise launches the system gdb, which
+cannot `import pwndbg`:
+
+```ini
+# ~/.pwn.conf, written only when the gdb on your PATH lacks pwndbg
+[context]
+gdb_binary='/usr/local/bin/pwndbg'
+```
+
+Install with `PWNELLIJ_NO_PWNTOOLS=1` to skip both; delete
+`~/.local/bin/pwntools-terminal` later to hand the choice of terminal back to
+pwntools.
 
 ## Configure
 
@@ -109,7 +135,7 @@ pipx install ruff pytest shellcheck-py     # once
 
 ruff check . && ruff format .              # lint + format
 pytest                                     # full suite
-shellcheck -s sh bin/pwnellij scripts/install.sh
+shellcheck -s sh bin/pwnellij bin/pwntools-terminal scripts/install.sh
 ```
 
 All three should pass before a pull request, and user-facing changes get a line

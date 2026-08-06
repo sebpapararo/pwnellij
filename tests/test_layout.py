@@ -10,6 +10,7 @@ class FakeMultiplexer(Multiplexer):
         self.calls: list[tuple[str, tuple, dict]] = []
         self.panes_list: list[Split] = [Split("%0", None, "main", {})]
         self.finished_with: dict | None = None
+        self.closed = False
 
     def _record(self, name, *args, **kwargs) -> Split:
         self.calls.append((name, args, kwargs))
@@ -51,7 +52,7 @@ class FakeMultiplexer(Multiplexer):
         self.calls.append(("do", (), kwargs))
 
     def close(self):
-        pass
+        self.closed = True
 
 
 class FakeDebugger(Debugger):
@@ -245,3 +246,41 @@ def test_explicit_multiplexer_is_never_overridden_by_fallback(monkeypatch):
     m = Layout(multiplexer=fs)
     assert m._fallback is False
     assert m.multiplexer is fs
+
+
+def _raise(*_args, **_kwargs):
+    raise RuntimeError("backend went away")
+
+
+class ExplodingDebugger(Debugger):
+    """Stands in for Pwndbg inside a gdb that cannot import pwndbg."""
+
+    def setup(self, multiplexer, **kwargs):
+        raise RuntimeError("pwnellij Pwndbg debugger requires pwndbg")
+
+
+def test_build_falls_back_when_debugger_setup_fails(capsys):
+    fs = FakeMultiplexer()
+    Layout(multiplexer=fs, debugger=ExplodingDebugger()).above(display="disasm").build()
+    err = capsys.readouterr().err
+    assert "pwnellij: failed to build the layout" in err
+    assert "requires pwndbg" in err
+    assert fs.closed is True  # the useless panes are torn down
+
+
+def test_build_falls_back_when_multiplexer_finish_fails(capsys):
+    fs, ft = FakeMultiplexer(), FakeDebugger()
+    fs.finish = _raise
+    m = Layout(multiplexer=fs, debugger=ft)
+    m.build()
+    assert ft.received_multiplexer is None  # debugger never wired up
+    assert m._fallback is True
+    assert fs.closed is True
+    assert "pwnellij: failed to build the layout" in capsys.readouterr().err
+
+
+def test_build_cleanup_failure_does_not_mask_the_original_error(capsys):
+    fs = FakeMultiplexer()
+    fs.close = _raise
+    Layout(multiplexer=fs, debugger=ExplodingDebugger()).build()
+    assert "requires pwndbg" in capsys.readouterr().err
